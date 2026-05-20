@@ -13,21 +13,21 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
+          cpus: "0.20"
           memory: 20MB
 
   api01:
-    image: acauhi/rinha-2026-rust@sha256:4fe38dc34359efe7b22b700087581972d7e5734653e2e9f8eab03469bf6090a3
+    image: acauhi/rinha-2026-rust@sha256:1a4f267ae3af9458f1d95090c5344c7c0098d40598e91da017c4f62b01834db2
     deploy:
       resources:
         limits:
-          cpus: "0.45"
+          cpus: "0.40"
           memory: 165MB
 
   api02:
-    image: acauhi/rinha-2026-rust@sha256:4fe38dc34359efe7b22b700087581972d7e5734653e2e9f8eab03469bf6090a3
+    image: acauhi/rinha-2026-rust@sha256:1a4f267ae3af9458f1d95090c5344c7c0098d40598e91da017c4f62b01834db2
     deploy:
       resources:
         limits:
-          cpus: "0.45"
+          cpus: "0.40"
           memory: 165MB
