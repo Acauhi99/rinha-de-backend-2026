@@ -1,11 +1,10 @@
-name: rinha-backend-2026-elixir
+name: rinha-backend-2026
 
 services:
   lb:
     image: nginx:1.27-alpine
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - sock:/run/sock
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
       - "9999:9999"
     depends_on:
@@ -18,21 +17,7 @@ services:
           memory: 20MB
 
   api01:
-    image: acauhi/rinha-2026-elixir@sha256:d2907c6804ba00b0c11f7a8d21496afc1cbc88b61898e216f84fb824a3c2828b
-    environment:
-      SOCKET_PATH: /run/sock/api01.sock
-      INDEX_DIR: /app/index
-      CANDIDATES_TARGET: "1200"
-      CANDIDATES_HARD_CAP: "2000"
-      NPROBE_PRIMARY: "240"
-      NPROBE_SECOND_PASS: "240"
-      BORDERLINE_SECOND_PASS_ENABLED: "0"
-      BORDERLINE_HITS_MIN: "2"
-      BORDERLINE_HITS_MAX: "3"
-      RINHA_RESOURCES_DIR: /app/resources
-      ERL_AFLAGS: "+S 1:1 +A 1 +sbwt none +sbwtdcpu none +sbwtdio none"
-    volumes:
-      - sock:/run/sock
+    image: acauhi/rinha-2026-rust:latest
     deploy:
       resources:
         limits:
@@ -40,26 +25,9 @@ services:
           memory: 165MB
 
   api02:
-    image: acauhi/rinha-2026-elixir@sha256:d2907c6804ba00b0c11f7a8d21496afc1cbc88b61898e216f84fb824a3c2828b
-    environment:
-      SOCKET_PATH: /run/sock/api02.sock
-      INDEX_DIR: /app/index
-      CANDIDATES_TARGET: "1200"
-      CANDIDATES_HARD_CAP: "2000"
-      NPROBE_PRIMARY: "240"
-      NPROBE_SECOND_PASS: "240"
-      BORDERLINE_SECOND_PASS_ENABLED: "0"
-      BORDERLINE_HITS_MIN: "2"
-      BORDERLINE_HITS_MAX: "3"
-      RINHA_RESOURCES_DIR: /app/resources
-      ERL_AFLAGS: "+S 1:1 +A 1 +sbwt none +sbwtdcpu none +sbwtdio none"
-    volumes:
-      - sock:/run/sock
+    image: acauhi/rinha-2026-rust:latest
     deploy:
       resources:
         limits:
           cpus: "0.45"
           memory: 165MB
-
-volumes:
-  sock:
