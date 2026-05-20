@@ -285,7 +285,7 @@ pub fn search(index: &Index, query: &[i16; 14]) -> [Candidate; 5] {
     }
 
     let fraud_count = heap.items.iter().filter(|c| c.label == 1).count();
-    if fraud_count > 0 && fraud_count < 5 {
+    if fraud_count == 2 || fraud_count == 3 {
         for k in 0..index.k_clusters {
             if best_clusters.iter().any(|&c| c == k) { continue; }
             let fifth = heap.max_dist();
