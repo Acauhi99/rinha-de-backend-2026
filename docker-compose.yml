@@ -17,7 +17,7 @@ services:
           memory: 20MB
 
   api01:
-    image: acauhi/rinha-2026-rust@sha256:38752a2989958157651f2ce7f5f74377ca71dec3de4bc1dfb5a5338151ed9d66
+    image: acauhi/rinha-2026-rust@sha256:4fe38dc34359efe7b22b700087581972d7e5734653e2e9f8eab03469bf6090a3
     deploy:
       resources:
         limits:
@@ -25,7 +25,7 @@ services:
           memory: 165MB
 
   api02:
-    image: acauhi/rinha-2026-rust@sha256:38752a2989958157651f2ce7f5f74377ca71dec3de4bc1dfb5a5338151ed9d66
+    image: acauhi/rinha-2026-rust@sha256:4fe38dc34359efe7b22b700087581972d7e5734653e2e9f8eab03469bf6090a3
     deploy:
       resources:
         limits:
