@@ -249,14 +249,12 @@ fn min_possible_distance(index: &Index, query: &[i16; 14], cluster: u32) -> u32 
 }
 
 pub fn search(index: &Index, query: &[i16; 14]) -> [Candidate; 5] {
-    const CLUSTERS_TO_SCAN: usize = 2;
-
     let query_f32: [f32; 14] = std::array::from_fn(|i| query[i] as f32 / index.scale as f32);
     let centroids = index.centroids();
     let dim = index.dim as usize;
 
-    let mut best_clusters = [0u32; CLUSTERS_TO_SCAN];
-    let mut best_dists = [f32::MAX; CLUSTERS_TO_SCAN];
+    let mut best_cluster = 0u32;
+    let mut best_centroid_dist = f32::MAX;
 
     for k in 0..index.k_clusters {
         let c_start = (k as usize) * dim;
@@ -265,34 +263,25 @@ pub fn search(index: &Index, query: &[i16; 14]) -> [Candidate; 5] {
             let diff = query_f32[d] - centroids[c_start + d];
             dist += diff * diff;
         }
-        if dist < best_dists[CLUSTERS_TO_SCAN - 1] {
-            let mut pos = CLUSTERS_TO_SCAN - 1;
-            while pos > 0 && dist < best_dists[pos - 1] {
-                best_dists[pos] = best_dists[pos - 1];
-                best_clusters[pos] = best_clusters[pos - 1];
-                pos -= 1;
-            }
-            best_dists[pos] = dist;
-            best_clusters[pos] = k;
+        if dist < best_centroid_dist {
+            best_centroid_dist = dist;
+            best_cluster = k;
         }
     }
 
     let mut heap = FixedHeap::<5>::new();
-    for i in 0..CLUSTERS_TO_SCAN {
-        if best_dists[i].is_finite() {
-            scan_cluster(index, query, best_clusters[i], &mut heap);
-        }
-    }
+    scan_cluster(index, query, best_cluster, &mut heap);
 
-    let fraud_count = heap.items.iter().filter(|c| c.label == 1).count();
-    if fraud_count == 2 || fraud_count == 3 {
-        for k in 0..index.k_clusters {
-            if best_clusters.iter().any(|&c| c == k) { continue; }
-            let fifth = heap.max_dist();
-            let min_dist = min_possible_distance(index, query, k);
-            if min_dist < fifth {
-                scan_cluster(index, query, k, &mut heap);
-            }
+    for k in 0..index.k_clusters {
+        if k == best_cluster { continue; }
+        if heap.len < 5 {
+            scan_cluster(index, query, k, &mut heap);
+            continue;
+        }
+        let fifth = heap.max_dist();
+        let min_dist = min_possible_distance(index, query, k);
+        if min_dist < fifth {
+            scan_cluster(index, query, k, &mut heap);
         }
     }
 
