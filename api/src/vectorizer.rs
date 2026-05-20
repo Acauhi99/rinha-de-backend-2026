@@ -11,18 +11,18 @@ fn clamp(x: f64) -> f64 {
     x.clamp(0.0, 1.0)
 }
 
-fn mcc_risk(mcc: &str) -> f64 {
+fn mcc_risk(mcc: &[u8]) -> f64 {
     match mcc {
-        "5411" => 0.15,
-        "5812" => 0.30,
-        "5912" => 0.20,
-        "5944" => 0.45,
-        "7801" => 0.80,
-        "7802" => 0.75,
-        "7995" => 0.85,
-        "4511" => 0.35,
-        "5311" => 0.25,
-        "5999" => 0.50,
+        b"5411" => 0.15,
+        b"5812" => 0.30,
+        b"5912" => 0.20,
+        b"5944" => 0.45,
+        b"7801" => 0.80,
+        b"7802" => 0.75,
+        b"7995" => 0.85,
+        b"4511" => 0.35,
+        b"5311" => 0.25,
+        b"5999" => 0.50,
         _ => 0.5,
     }
 }
@@ -56,8 +56,9 @@ fn to_epoch_seconds(dt: (u16, u8, u8, u8, u8, u8)) -> i64 {
 
 fn minutes_between(later: (u16, u8, u8, u8, u8, u8), earlier: (u16, u8, u8, u8, u8, u8)) -> f64 {
     let diff_secs = to_epoch_seconds(later) - to_epoch_seconds(earlier);
-    if diff_secs <= 0 {
-        0.0
+    if diff_secs < 0 {
+        // clock skew / bad data: treat as no valid last transaction
+        -1.0
     } else {
         diff_secs as f64 / 60.0
     }
@@ -140,6 +141,16 @@ impl<'a> Cursor<'a> {
         if self.eat(b'-') {}
         while self.pos < self.data.len() && (self.data[self.pos].is_ascii_digit() || self.data[self.pos] == b'.') {
             self.pos += 1;
+        }
+        // handle scientific notation: e.g. 1e3, 3.84E-2
+        if self.pos < self.data.len() && matches!(self.data[self.pos], b'e' | b'E') {
+            self.pos += 1;
+            if self.pos < self.data.len() && matches!(self.data[self.pos], b'+' | b'-') {
+                self.pos += 1;
+            }
+            while self.pos < self.data.len() && self.data[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
         }
         let s = std::str::from_utf8(&self.data[start..self.pos]).map_err(|_| ())?;
         s.parse::<f64>().map_err(|_| ())
@@ -252,7 +263,7 @@ impl<'a> Cursor<'a> {
         if self.eat(b']') { return Ok(result); }
         loop {
             let s = self.parse_string_raw()?;
-            result.push(String::from_utf8_lossy(s).to_string());
+            result.push(String::from_utf8_lossy(s).into_owned());
             self.skip_ws();
             if self.eat(b']') { return Ok(result); }
             if !self.eat(b',') { return Err(()); }
@@ -312,8 +323,8 @@ pub fn parse_and_vectorize(body: &[u8]) -> Result<[f32; 14], ()> {
             b"merchant" => {
                 s.read_object(|k, s| {
                     match k {
-                        b"id" => { merchant_id = String::from_utf8_lossy(s.parse_string_raw()?).to_string(); }
-                        b"mcc" => { merchant_mcc = String::from_utf8_lossy(s.parse_string_raw()?).to_string(); }
+                        b"id" => { merchant_id = String::from_utf8_lossy(s.parse_string_raw()?).into_owned(); }
+                        b"mcc" => { merchant_mcc = String::from_utf8_lossy(s.parse_string_raw()?).into_owned(); }
                         b"avg_amount" => { merchant_avg_amount = s.parse_number()?; }
                         _ => { s.skip_value(); }
                     }
@@ -357,7 +368,7 @@ pub fn parse_and_vectorize(body: &[u8]) -> Result<[f32; 14], ()> {
     })?;
 
     if requested_at.1 == 0 { return Err(()); }
-    let unknown_merchant = if known_merchants.contains(&merchant_id) { 0.0 } else { 1.0 };
+    let unknown_merchant = if known_merchants.iter().any(|m| *m == merchant_id) { 0.0 } else { 1.0 };
 
     let v0 = clamp(amount / MAX_AMOUNT);
     let v1 = clamp(installments as f64 / MAX_INSTALLMENTS);
@@ -371,7 +382,7 @@ pub fn parse_and_vectorize(body: &[u8]) -> Result<[f32; 14], ()> {
     let v9 = if terminal_is_online { 1.0 } else { 0.0 };
     let v10 = if terminal_card_present { 1.0 } else { 0.0 };
     let v11 = unknown_merchant;
-    let v12 = mcc_risk(&merchant_mcc);
+    let v12 = mcc_risk(merchant_mcc.as_bytes());
     let v13 = clamp(merchant_avg_amount / MAX_MERCHANT_AVG_AMOUNT);
 
     Ok([
