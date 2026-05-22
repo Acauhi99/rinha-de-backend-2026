@@ -2,6 +2,9 @@ mod response;
 mod search;
 mod vectorizer;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use axum::{Router, routing::{get, post}, response::IntoResponse, extract::State};
 use std::sync::Arc;
 

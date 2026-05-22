@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
+mimalloc = { version = "0.1", default-features = false }
+memmap2 = "0.9"

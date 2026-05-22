@@ -1,7 +1,9 @@
 use std::cmp::Ordering;
+use std::fs::File;
+use memmap2::Mmap;
 
 pub struct Index {
-    backing: Box<[u8]>,
+    backing: Mmap,
     pub num_vectors: u32,
     pub dim: u32,
     pub k_clusters: u32,
@@ -17,8 +19,8 @@ pub struct Index {
 
 impl Index {
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let data = std::fs::read(path)?;
-        let data = data.into_boxed_slice();
+        let file = File::open(path)?;
+        let data = unsafe { Mmap::map(&file)? };
 
         if data.len() < 64 || &data[0..4] != b"RVIF" {
             return Err("invalid index file: bad magic".into());
