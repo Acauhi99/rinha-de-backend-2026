@@ -3,6 +3,7 @@ name: rinha-backend-2026
 services:
   lb:
     image: haproxy:2.9-alpine
+    command: ["haproxy", "-f", "/usr/local/etc/haproxy/haproxy.cfg", "-db"]
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     ports:
