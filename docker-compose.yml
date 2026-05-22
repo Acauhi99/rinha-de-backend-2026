@@ -3,7 +3,6 @@ name: rinha-backend-2026
 services:
   lb:
     image: haproxy:2.9-alpine
-    command: ["haproxy", "-f", "/usr/local/etc/haproxy/haproxy.cfg", "-db"]
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     ports:
@@ -14,21 +13,21 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.40"
+          cpus: "0.05"
           memory: 20MB
 
   api01:
-    image: acauhi/rinha-2026-rust@sha256:c9e5dc5d0f8c46c03f3ebef4638c53cf647dadef9e049dd9f94cb891e02cb625
+    image: acauhi/rinha-2026-rust@sha256:5d0ec68f58c5b2fbe9069c57a9f49ea978ba83b45e26055b2bae99b9b7a169e8
     deploy:
       resources:
         limits:
-          cpus: "0.30"
+          cpus: "0.475"
           memory: 165MB
 
   api02:
-    image: acauhi/rinha-2026-rust@sha256:c9e5dc5d0f8c46c03f3ebef4638c53cf647dadef9e049dd9f94cb891e02cb625
+    image: acauhi/rinha-2026-rust@sha256:5d0ec68f58c5b2fbe9069c57a9f49ea978ba83b45e26055b2bae99b9b7a169e8
     deploy:
       resources:
         limits:
-          cpus: "0.30"
+          cpus: "0.475"
           memory: 165MB
