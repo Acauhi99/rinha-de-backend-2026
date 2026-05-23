@@ -1,5 +1,3 @@
-use std::cmp::Ordering;
-
 pub struct Index {
     backing: Box<[u8]>,
     pub num_vectors: u32,
@@ -10,7 +8,8 @@ pub struct Index {
     vectors_off: usize,
     labels_off: usize,
     orig_ids_off: usize,
-    cluster_offsets_off: usize,
+    cluster_counts_off: usize,
+    cluster_byte_offsets_off: usize,
     bbox_min_off: usize,
     bbox_max_off: usize,
 }
@@ -24,25 +23,34 @@ impl Index {
             return Err("invalid index file: bad magic".into());
         }
 
+        let version = u32::from_le_bytes(data[4..8].try_into()?);
+        if version != 2 {
+            return Err("unsupported index version (expected v2)".into());
+        }
+
         let num_vectors = u32::from_le_bytes(data[8..12].try_into()?);
         let dim = u32::from_le_bytes(data[12..16].try_into()?);
         let k_clusters = u32::from_le_bytes(data[16..20].try_into()?);
         let scale = u32::from_le_bytes(data[20..24].try_into()?);
 
         let cs = (k_clusters * dim * 4) as usize;
-        let vs = (num_vectors * dim * 2) as usize;
         let ls = num_vectors as usize;
         let os = (num_vectors * 4) as usize;
-        let cos = ((k_clusters + 1) * 4) as usize;
+        let ccs = (k_clusters * 4) as usize; // cluster_counts
+        let cbs = ((k_clusters + 1) * 4) as usize; // cluster_byte_offsets
         let bs = (k_clusters * dim * 2) as usize;
 
         let centroids_off = 64usize;
         let vectors_off = centroids_off + cs;
-        let labels_off = vectors_off + vs;
-        let orig_ids_off = labels_off + ls;
-        let cluster_offsets_off = orig_ids_off + os + os; // orig_ids + cluster_of
-        let bbox_min_off = cluster_offsets_off + cos;
-        let bbox_max_off = bbox_min_off + bs;
+
+        let total = data.len();
+        let bbox_max_off = total - bs;
+        let bbox_min_off = bbox_max_off - bs;
+        let cluster_byte_offsets_off = bbox_min_off - cbs;
+        let _cluster_of_off = cluster_byte_offsets_off - os;
+        let cluster_counts_off = _cluster_of_off - ccs;
+        let orig_ids_off = cluster_counts_off - os;
+        let labels_off = orig_ids_off - ls;
 
         let expected = bbox_max_off + bs;
         if data.len() < expected {
@@ -59,7 +67,8 @@ impl Index {
             vectors_off,
             labels_off,
             orig_ids_off,
-            cluster_offsets_off,
+            cluster_counts_off,
+            cluster_byte_offsets_off,
             bbox_min_off,
             bbox_max_off,
         })
@@ -68,11 +77,6 @@ impl Index {
     fn centroids(&self) -> &[f32] {
         let len = (self.k_clusters * self.dim) as usize;
         unsafe { std::slice::from_raw_parts(self.backing.as_ptr().add(self.centroids_off) as *const f32, len) }
-    }
-
-    fn vectors(&self) -> &[i16] {
-        let len = (self.num_vectors * self.dim) as usize;
-        unsafe { std::slice::from_raw_parts(self.backing.as_ptr().add(self.vectors_off) as *const i16, len) }
     }
 
     fn labels(&self) -> &[u8] {
@@ -85,9 +89,34 @@ impl Index {
         unsafe { std::slice::from_raw_parts(self.backing.as_ptr().add(self.orig_ids_off) as *const u32, len) }
     }
 
-    fn cluster_offsets(&self) -> &[u32] {
+    fn cluster_counts(&self) -> &[u32] {
+        let len = self.k_clusters as usize;
+        unsafe { std::slice::from_raw_parts(self.backing.as_ptr().add(self.cluster_counts_off) as *const u32, len) }
+    }
+
+    fn cluster_byte_offsets(&self) -> &[u32] {
         let len = (self.k_clusters + 1) as usize;
-        unsafe { std::slice::from_raw_parts(self.backing.as_ptr().add(self.cluster_offsets_off) as *const u32, len) }
+        unsafe { std::slice::from_raw_parts(self.backing.as_ptr().add(self.cluster_byte_offsets_off) as *const u32, len) }
+    }
+
+    fn cluster_info(&self, cluster: u32) -> (usize, usize, usize, usize) {
+        let byte_offs = self.cluster_byte_offsets();
+        let counts = self.cluster_counts();
+        let byte_start = self.vectors_off + byte_offs[cluster as usize] as usize;
+        let byte_end = self.vectors_off + byte_offs[(cluster + 1) as usize] as usize;
+        let mut vec_start = 0usize;
+        for k in 0..cluster as usize {
+            vec_start += counts[k] as usize;
+        }
+        let vec_end = vec_start + counts[cluster as usize] as usize;
+        (byte_start, byte_end, vec_start, vec_end)
+    }
+
+    fn cluster_padded(&self, cluster: u32) -> usize {
+        let byte_offs = self.cluster_byte_offsets();
+        let start = byte_offs[cluster as usize] as usize;
+        let end = byte_offs[(cluster + 1) as usize] as usize;
+        (end - start) / (2 * self.dim as usize)
     }
 
     fn bbox_min_for_cluster(&self, cluster: u32) -> &[i16] {
@@ -100,13 +129,6 @@ impl Index {
         let len = self.dim as usize;
         let off = self.bbox_max_off + (cluster as usize) * len * 2;
         unsafe { std::slice::from_raw_parts(self.backing.as_ptr().add(off) as *const i16, len) }
-    }
-
-    fn cluster_range(&self, cluster: u32) -> (usize, usize) {
-        let offsets = self.cluster_offsets();
-        let start = offsets[cluster as usize] as usize;
-        let end = offsets[(cluster + 1) as usize] as usize;
-        (start, end)
     }
 }
 
@@ -130,17 +152,26 @@ impl<const K: usize> FixedHeap<K> {
         }
     }
 
+    fn less(a: &Candidate, b: &Candidate) -> bool {
+        a.dist < b.dist || (a.dist == b.dist && a.orig_id < b.orig_id)
+    }
+
     fn push(&mut self, cand: Candidate) {
         if self.len < K {
-            self.items[self.len] = cand;
-            self.len += 1;
-            self.items[..self.len].sort_unstable_by(compare_candidates);
-        } else {
-            let worst = &self.items[K - 1];
-            if cand.dist < worst.dist || (cand.dist == worst.dist && cand.orig_id < worst.orig_id) {
-                self.items[K - 1] = cand;
-                self.items[..K].sort_unstable_by(compare_candidates);
+            let mut pos = self.len;
+            while pos > 0 && Self::less(&cand, &self.items[pos - 1]) {
+                self.items[pos] = self.items[pos - 1];
+                pos -= 1;
             }
+            self.items[pos] = cand;
+            self.len += 1;
+        } else if Self::less(&cand, &self.items[K - 1]) {
+            let mut pos = K - 1;
+            while pos > 0 && Self::less(&cand, &self.items[pos - 1]) {
+                self.items[pos] = self.items[pos - 1];
+                pos -= 1;
+            }
+            self.items[pos] = cand;
         }
     }
 
@@ -153,74 +184,111 @@ impl<const K: usize> FixedHeap<K> {
     }
 }
 
-fn compare_candidates(a: &Candidate, b: &Candidate) -> Ordering {
-    a.dist.cmp(&b.dist).then_with(|| a.orig_id.cmp(&b.orig_id))
-}
+fn scan_cluster_scalar(index: &Index, query: &[i16; 14], cluster: u32, heap: &mut FixedHeap<5>) {
+    let dim = index.dim as usize;
+    let (_, _, vec_start, vec_end) = index.cluster_info(cluster);
+    let padded = index.cluster_padded(cluster);
+    let stride = padded * 2;
 
-fn l2_distance_i16_scalar(a: &[i16; 14], b: &[i16; 14]) -> u32 {
-    let mut sum = 0u32;
-    for i in 0..14 {
-        let d = a[i] as i32 - b[i] as i32;
-        sum += (d * d) as u32;
+    let base = unsafe { index.backing.as_ptr().add(index.vectors_off) };
+    let byte_offs = index.cluster_byte_offsets();
+    let cluster_byte_start = byte_offs[cluster as usize] as usize;
+
+    let labels = index.labels();
+    let orig_ids = index.orig_ids();
+    let actual = vec_end - vec_start;
+
+    for vi in 0..actual {
+        let block = vi / 8;
+        let lane = vi % 8;
+        let mut sum = 0u32;
+
+        for d in 0..dim {
+            let off = cluster_byte_start + d * stride + block * 16 + lane * 2;
+            let val = unsafe { *(base.add(off) as *const i16) };
+            let q = query[d] as i32;
+            let v = val as i32;
+            let diff = q - v;
+            sum += (diff * diff) as u32;
+        }
+
+        let cand = Candidate {
+            dist: sum,
+            orig_id: orig_ids[vec_start + vi],
+            label: labels[vec_start + vi],
+        };
+        heap.push(cand);
     }
-    sum
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn l2_distance_i16_avx2(a: &[i16; 14], b: &[i16; 14]) -> u32 {
+unsafe fn scan_cluster_avx2(index: &Index, query: &[i16; 14], cluster: u32, heap: &mut FixedHeap<5>) {
     use std::arch::x86_64::*;
 
-    let a0 = _mm_loadu_si128(a.as_ptr() as *const __m128i);
-    let b0 = _mm_loadu_si128(b.as_ptr() as *const __m128i);
-    let d0 = _mm_sub_epi16(a0, b0);
-    let s0 = _mm_madd_epi16(d0, d0);
+    let (_byte_start, _, vec_start, vec_end) = index.cluster_info(cluster);
+    let actual = vec_end - vec_start;
+    let padded = index.cluster_padded(cluster);
+    let stride = padded * 2;
 
-    let mut sums = [0i32; 4];
-    _mm_storeu_si128(sums.as_mut_ptr() as *mut __m128i, s0);
-    let mut sum = (sums[0] + sums[1] + sums[2] + sums[3]) as u32;
-
-    for i in 8..14 {
-        let d = a[i] as i32 - b[i] as i32;
-        sum += (d * d) as u32;
+    let mut q_broadcast: [__m256i; 14] = [_mm256_setzero_si256(); 14];
+    for d in 0..14 {
+        q_broadcast[d] = _mm256_set1_epi32(query[d] as i32);
     }
-    sum
-}
 
-#[cfg(not(target_arch = "x86_64"))]
-fn l2_distance_i16_avx2(a: &[i16; 14], b: &[i16; 14]) -> u32 {
-    l2_distance_i16_scalar(a, b)
-}
+    let byte_offs = index.cluster_byte_offsets();
+    let cluster_byte_start = byte_offs[cluster as usize] as usize;
+    let base = index.backing.as_ptr().add(index.vectors_off + cluster_byte_start);
+    let labels = index.labels();
+    let orig_ids = index.orig_ids();
 
-pub fn l2_distance_i16(a: &[i16; 14], b: &[i16; 14]) -> u32 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") {
-            unsafe { return l2_distance_i16_avx2(a, b); }
+    for block in 0..padded / 8 {
+        let mut acc_lo = _mm256_setzero_si256();
+        let mut acc_hi = _mm256_setzero_si256();
+
+        for d in 0..14 {
+            let col_ptr = base.add(block * 8 * 2 + d * stride) as *const __m128i;
+            let col = _mm_loadu_si128(col_ptr);
+            let col32 = _mm256_cvtepi16_epi32(col);
+            let diff = _mm256_sub_epi32(col32, q_broadcast[d]);
+            let sq = _mm256_mullo_epi32(diff, diff);
+
+            let sq_lo128 = _mm256_extracti128_si256::<0>(sq);
+            let sq_hi128 = _mm256_extracti128_si256::<1>(sq);
+            let sq_lo64 = _mm256_cvtepi32_epi64(sq_lo128);
+            let sq_hi64 = _mm256_cvtepi32_epi64(sq_hi128);
+
+            acc_lo = _mm256_add_epi64(acc_lo, sq_lo64);
+            acc_hi = _mm256_add_epi64(acc_hi, sq_hi64);
+        }
+
+        let mut dists = [0i64; 8];
+        _mm256_storeu_si256(dists.as_mut_ptr() as *mut __m256i, acc_lo);
+        _mm256_storeu_si256(dists.as_mut_ptr().add(4) as *mut __m256i, acc_hi);
+
+        for lane in 0..8 {
+            let vi = block * 8 + lane;
+            if vi >= actual { break; }
+
+            let cand = Candidate {
+                dist: dists[lane] as u32,
+                orig_id: orig_ids[vec_start + vi],
+                label: labels[vec_start + vi],
+            };
+            heap.push(cand);
         }
     }
-    l2_distance_i16_scalar(a, b)
 }
 
 fn scan_cluster(index: &Index, query: &[i16; 14], cluster: u32, heap: &mut FixedHeap<5>) {
-    let dim = index.dim as usize;
-    let vectors = index.vectors();
-    let labels = index.labels();
-    let orig_ids = index.orig_ids();
-    let (start, end) = index.cluster_range(cluster);
-
-    for i in start..end {
-        let vec_start = i * dim;
-        let vec: &[i16] = &vectors[vec_start..vec_start + dim];
-        let arr: &[i16; 14] = unsafe { &*(vec.as_ptr() as *const [i16; 14]) };
-        let dist = l2_distance_i16(query, arr);
-        let cand = Candidate {
-            dist,
-            orig_id: orig_ids[i],
-            label: labels[i],
-        };
-        heap.push(cand);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe { scan_cluster_avx2(index, query, cluster, heap); }
+            return;
+        }
     }
+    scan_cluster_scalar(index, query, cluster, heap);
 }
 
 fn min_possible_distance(index: &Index, query: &[i16; 14], cluster: u32) -> u32 {

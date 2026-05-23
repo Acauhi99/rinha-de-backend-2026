@@ -228,14 +228,14 @@ fn main() {
     drop(labels);
     drop(vectors_i16);
 
-    // --- 6. Write index.bin ---
+    // --- 6. Write index.bin v2 (SoA layout) ---
     eprintln!("Writing index.bin...");
     let file = fs::File::create(output_path).expect("Cannot create output file");
     let mut w = BufWriter::new(file);
 
-    // Header
+    // Header (version 2)
     w.write_all(b"RVIF").unwrap();
-    w.write_all(&1u32.to_le_bytes()).unwrap();
+    w.write_all(&2u32.to_le_bytes()).unwrap();
     w.write_all(&(n as u32).to_le_bytes()).unwrap();
     w.write_all(&(DIM as u32).to_le_bytes()).unwrap();
     w.write_all(&(K as u32).to_le_bytes()).unwrap();
@@ -249,11 +249,32 @@ fn main() {
         }
     }
 
-    // Vectors i16 (cluster-sorted, row-major [N][DIM])
-    for vec in &sorted_vec {
+    // Vectors i16 SoA per cluster, padded to 8
+    let mut actual_counts: Vec<u32> = Vec::with_capacity(K);
+    let mut soa_byte_offsets: Vec<u32> = Vec::with_capacity(K + 1);
+    soa_byte_offsets.push(0);
+    let mut total_padded: usize = 0;
+
+    for k in 0..K {
+        let start = cluster_offsets[k as usize] as usize;
+        let end = cluster_offsets[(k + 1) as usize] as usize;
+        let actual = end - start;
+        let padded = ((actual + 7) / 8) * 8;
+        actual_counts.push(actual as u32);
+
         for d in 0..DIM {
-            w.write_all(&vec[d].to_le_bytes()).unwrap();
+            for i in 0..padded {
+                if i < actual {
+                    w.write_all(&sorted_vec[start + i][d].to_le_bytes()).unwrap();
+                } else {
+                    w.write_all(&i16::MAX.to_le_bytes()).unwrap();
+                }
+            }
         }
+
+        let chunk = padded * DIM * 2;
+        total_padded += chunk;
+        soa_byte_offsets.push(total_padded as u32);
     }
 
     // Labels u8 (0=legit, 1=fraud)
@@ -264,13 +285,18 @@ fn main() {
         w.write_all(&id.to_le_bytes()).unwrap();
     }
 
+    // ClusterCounts u32 [K]
+    for &count in &actual_counts {
+        w.write_all(&count.to_le_bytes()).unwrap();
+    }
+
     // cluster_of u32
     for &c in &sorted_clu {
         w.write_all(&c.to_le_bytes()).unwrap();
     }
 
-    // cluster_offsets u32 prefix-sum [K+1]
-    for &off in &cluster_offsets {
+    // cluster_byte_offsets u32 prefix-sum [K+1] (SoA byte offsets)
+    for &off in &soa_byte_offsets {
         w.write_all(&off.to_le_bytes()).unwrap();
     }
 
@@ -290,10 +316,8 @@ fn main() {
 
     w.flush().unwrap();
 
-    // Stats
     let c_size = K * DIM * 4;
-    let v_size = n * DIM * 2;
-    eprintln!("Index written: N={} K={} dim={} scale={}", n, K, DIM, SCALE);
+    eprintln!("Index written: N={} K={} dim={} scale={} (v2 SoA)", n, K, DIM, SCALE);
     eprintln!("Centroid block: {}*{}*{} = {} bytes", K, DIM, 4, c_size);
-    eprintln!("Vectors block: {}*{}*{} = {} bytes", n, DIM, 2, v_size);
+    eprintln!("Vectors SoA block: {} total_padded={}", total_padded, total_padded / 2 / DIM);
 }
