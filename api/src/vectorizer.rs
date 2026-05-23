@@ -57,7 +57,6 @@ fn to_epoch_seconds(dt: (u16, u8, u8, u8, u8, u8)) -> i64 {
 fn minutes_between(later: (u16, u8, u8, u8, u8, u8), earlier: (u16, u8, u8, u8, u8, u8)) -> f64 {
     let diff_secs = to_epoch_seconds(later) - to_epoch_seconds(earlier);
     if diff_secs < 0 {
-        // clock skew / bad data: treat as no valid last transaction
         -1.0
     } else {
         diff_secs as f64 / 60.0
@@ -102,6 +101,61 @@ fn atoi_u8(s: &[u8]) -> Result<u8, ()> {
     Ok(n)
 }
 
+fn atoi_u32(s: &[u8]) -> u32 {
+    let mut n: u32 = 0;
+    for &b in s {
+        n = n * 10 + (b - b'0') as u32;
+    }
+    n
+}
+
+fn atof(bytes: &[u8]) -> f64 {
+    let negative = bytes[0] == b'-';
+    let mut i = if negative { 1usize } else { 0usize };
+
+    let mut int_part: u64 = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        int_part = int_part * 10 + (bytes[i] - b'0') as u64;
+        i += 1;
+    }
+
+    let mut frac_part: u64 = 0;
+    let mut frac_div: u64 = 1;
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            frac_part = frac_part * 10 + (bytes[i] - b'0') as u64;
+            frac_div *= 10;
+            i += 1;
+        }
+    }
+
+    let mut exp = 0i32;
+    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+        i += 1;
+        let exp_neg = if i < bytes.len() && bytes[i] == b'-' {
+            i += 1;
+            true
+        } else {
+            if i < bytes.len() && bytes[i] == b'+' { i += 1; }
+            false
+        };
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            exp = exp * 10 + (bytes[i] - b'0') as i32;
+            i += 1;
+        }
+        if exp_neg { exp = -exp; }
+    }
+
+    let mut val = int_part as f64;
+    if frac_div > 1 {
+        val += frac_part as f64 / frac_div as f64;
+    }
+    val *= 10.0f64.powi(exp);
+    if negative { val = -val; }
+    val
+}
+
 struct Cursor<'a> {
     data: &'a [u8],
     pos: usize,
@@ -142,7 +196,6 @@ impl<'a> Cursor<'a> {
         while self.pos < self.data.len() && (self.data[self.pos].is_ascii_digit() || self.data[self.pos] == b'.') {
             self.pos += 1;
         }
-        // handle scientific notation: e.g. 1e3, 3.84E-2
         if self.pos < self.data.len() && matches!(self.data[self.pos], b'e' | b'E') {
             self.pos += 1;
             if self.pos < self.data.len() && matches!(self.data[self.pos], b'+' | b'-') {
@@ -152,8 +205,8 @@ impl<'a> Cursor<'a> {
                 self.pos += 1;
             }
         }
-        let s = std::str::from_utf8(&self.data[start..self.pos]).map_err(|_| ())?;
-        s.parse::<f64>().map_err(|_| ())
+        let slice = &self.data[start..self.pos];
+        Ok(atof(slice))
     }
 
     fn parse_int(&mut self) -> Result<u32, ()> {
@@ -161,8 +214,9 @@ impl<'a> Cursor<'a> {
         while self.pos < self.data.len() && self.data[self.pos].is_ascii_digit() {
             self.pos += 1;
         }
-        let s = std::str::from_utf8(&self.data[start..self.pos]).map_err(|_| ())?;
-        s.parse::<u32>().map_err(|_| ())
+        let slice = &self.data[start..self.pos];
+        if slice.is_empty() { return Err(()); }
+        Ok(atoi_u32(slice))
     }
 
     fn parse_bool(&mut self) -> Result<bool, ()> {
@@ -256,14 +310,14 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn parse_string_array(&mut self) -> Result<Vec<String>, ()> {
+    fn parse_string_array_bytes(&mut self) -> Result<Vec<Vec<u8>>, ()> {
         if !self.eat(b'[') { return Err(()); }
         self.skip_ws();
         let mut result = Vec::new();
         if self.eat(b']') { return Ok(result); }
         loop {
             let s = self.parse_string_raw()?;
-            result.push(String::from_utf8_lossy(s).into_owned());
+            result.push(s.to_vec());
             self.skip_ws();
             if self.eat(b']') { return Ok(result); }
             if !self.eat(b',') { return Err(()); }
@@ -280,9 +334,9 @@ pub fn parse_and_vectorize(body: &[u8]) -> Result<[f32; 14], ()> {
     let mut requested_at = (0u16, 0u8, 0u8, 0u8, 0u8, 0u8);
     let mut customer_avg_amount = 0.0f64;
     let mut customer_tx_count_24h = 0u32;
-    let mut known_merchants: Vec<String> = Vec::new();
-    let mut merchant_id = String::new();
-    let mut merchant_mcc = String::new();
+    let mut known_merchants: Vec<Vec<u8>> = Vec::new();
+    let mut merchant_id: Vec<u8> = Vec::new();
+    let mut merchant_mcc: Vec<u8> = Vec::new();
     let mut merchant_avg_amount = 0.0f64;
     let mut terminal_is_online = false;
     let mut terminal_card_present = false;
@@ -314,7 +368,7 @@ pub fn parse_and_vectorize(body: &[u8]) -> Result<[f32; 14], ()> {
                     match k {
                         b"avg_amount" => { customer_avg_amount = s.parse_number()?; }
                         b"tx_count_24h" => { customer_tx_count_24h = s.parse_int()?; }
-                        b"known_merchants" => { known_merchants = s.parse_string_array()?; }
+                        b"known_merchants" => { known_merchants = s.parse_string_array_bytes()?; }
                         _ => { s.skip_value(); }
                     }
                     Ok(())
@@ -323,8 +377,8 @@ pub fn parse_and_vectorize(body: &[u8]) -> Result<[f32; 14], ()> {
             b"merchant" => {
                 s.read_object(|k, s| {
                     match k {
-                        b"id" => { merchant_id = String::from_utf8_lossy(s.parse_string_raw()?).into_owned(); }
-                        b"mcc" => { merchant_mcc = String::from_utf8_lossy(s.parse_string_raw()?).into_owned(); }
+                        b"id" => { merchant_id = s.parse_string_raw()?.to_vec(); }
+                        b"mcc" => { merchant_mcc = s.parse_string_raw()?.to_vec(); }
                         b"avg_amount" => { merchant_avg_amount = s.parse_number()?; }
                         _ => { s.skip_value(); }
                     }
@@ -368,7 +422,7 @@ pub fn parse_and_vectorize(body: &[u8]) -> Result<[f32; 14], ()> {
     })?;
 
     if requested_at.1 == 0 { return Err(()); }
-    let unknown_merchant = if known_merchants.iter().any(|m| *m == merchant_id) { 0.0 } else { 1.0 };
+    let unknown_merchant = if known_merchants.iter().any(|m| m == &merchant_id) { 0.0 } else { 1.0 };
 
     let v0 = clamp(amount / MAX_AMOUNT);
     let v1 = clamp(installments as f64 / MAX_INSTALLMENTS);
@@ -382,7 +436,7 @@ pub fn parse_and_vectorize(body: &[u8]) -> Result<[f32; 14], ()> {
     let v9 = if terminal_is_online { 1.0 } else { 0.0 };
     let v10 = if terminal_card_present { 1.0 } else { 0.0 };
     let v11 = unknown_merchant;
-    let v12 = mcc_risk(merchant_mcc.as_bytes());
+    let v12 = mcc_risk(&merchant_mcc);
     let v13 = clamp(merchant_avg_amount / MAX_MERCHANT_AVG_AMOUNT);
 
     Ok([
