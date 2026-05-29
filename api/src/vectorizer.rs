@@ -27,31 +27,22 @@ fn mcc_risk(mcc: &[u8]) -> f64 {
     }
 }
 
-fn is_leap_year(y: i32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
-}
-
-fn days_in_month(y: i32, m: u32) -> u32 {
-    match m {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(y) => 29,
-        2 => 28,
-        _ => unreachable!(),
-    }
-}
-
 fn to_epoch_seconds(dt: (u16, u8, u8, u8, u8, u8)) -> i64 {
     let (y, m, d, hh, mm, ss) = dt;
-    let mut total = 0i64;
-    for year in 1970..y as i32 {
-        total += if is_leap_year(year) { 366 } else { 365 };
-    }
-    for month in 1..m as u32 {
-        total += days_in_month(y as i32, month) as i64;
-    }
-    total += d as i64 - 1;
-    total * 86400 + hh as i64 * 3600 + mm as i64 * 60 + ss as i64
+    let y = y as i64;
+    let m = m as i64;
+    let d = d as i64;
+
+    let adjusted_month = if m <= 2 { m + 12 } else { m };
+    let adjusted_year = if m <= 2 { y - 1 } else { y };
+
+    let era = adjusted_year / 400;
+    let yoe = adjusted_year - era * 400;
+    let doy = (153 * (adjusted_month - 3) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+
+    days * 86400 + hh as i64 * 3600 + mm as i64 * 60 + ss as i64
 }
 
 fn minutes_between(later: (u16, u8, u8, u8, u8, u8), earlier: (u16, u8, u8, u8, u8, u8)) -> f64 {

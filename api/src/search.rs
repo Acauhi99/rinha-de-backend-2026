@@ -316,26 +316,95 @@ fn min_possible_distance(index: &Index, query: &[i16; 14], cluster: u32) -> u32 
     sum
 }
 
-pub fn search(index: &Index, query: &[i16; 14]) -> [Candidate; 5] {
-    let query_f32: [f32; 14] = std::array::from_fn(|i| query[i] as f32 / index.scale as f32);
-    let centroids = index.centroids();
-    let dim = index.dim as usize;
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn centroid_distance_avx2(centroid: *const f32, query: *const f32) -> f32 {
+    use std::arch::x86_64::*;
 
+    let c0 = _mm256_loadu_ps(centroid);
+    let c1 = _mm256_loadu_ps(centroid.add(8));
+    let q0 = _mm256_loadu_ps(query);
+    let q1 = _mm256_loadu_ps(query.add(8));
+
+    let d0 = _mm256_sub_ps(c0, q0);
+    let d1 = _mm256_sub_ps(c1, q1);
+
+    let s0 = _mm256_mul_ps(d0, d0);
+    let s1 = _mm256_mul_ps(d1, d1);
+    let acc = _mm256_add_ps(s0, s1);
+
+    let hi = _mm256_extractf128_ps::<1>(acc);
+    let lo = _mm256_castps256_ps128(acc);
+    let sum128 = _mm_add_ps(lo, hi);
+    let sum64 = _mm_add_ps(sum128, _mm_movehl_ps(sum128, sum128));
+    let sum32 = _mm_add_ss(sum64, _mm_shuffle_ps(sum64, sum64, 1));
+
+    _mm_cvtss_f32(sum32)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn nearest_centroid_avx2(centroids: *const f32, k_clusters: u32, query: *const f32) -> u32 {
     let mut best_cluster = 0u32;
-    let mut best_centroid_dist = f32::MAX;
+    let mut best_dist = f32::MAX;
 
-    for k in 0..index.k_clusters {
-        let c_start = (k as usize) * dim;
+    let mut k = 0u32;
+    while k < k_clusters {
+        let dist = centroid_distance_avx2(centroids.add(k as usize * 14), query);
+        if dist < best_dist {
+            best_dist = dist;
+            best_cluster = k;
+        }
+        k += 1;
+    }
+
+    best_cluster
+}
+
+fn nearest_centroid_scalar(centroids: &[f32], k_clusters: u32, query: &[f32; 14]) -> u32 {
+    let mut best_cluster = 0u32;
+    let mut best_dist = f32::MAX;
+
+    for k in 0..k_clusters {
+        let c_start = (k as usize) * 14;
         let mut dist = 0.0f32;
-        for d in 0..dim {
-            let diff = query_f32[d] - centroids[c_start + d];
+        for d in 0..14 {
+            let diff = centroids[c_start + d] - query[d];
             dist += diff * diff;
         }
-        if dist < best_centroid_dist {
-            best_centroid_dist = dist;
+        if dist < best_dist {
+            best_dist = dist;
             best_cluster = k;
         }
     }
+
+    best_cluster
+}
+
+pub fn search(index: &Index, query: &[i16; 14]) -> [Candidate; 5] {
+    let query_f32: [f32; 14] = std::array::from_fn(|i| query[i] as f32 / index.scale as f32);
+    let centroids = index.centroids();
+
+    let best_cluster = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                unsafe {
+                    nearest_centroid_avx2(
+                        centroids.as_ptr(),
+                        index.k_clusters,
+                        query_f32.as_ptr(),
+                    )
+                }
+            } else {
+                nearest_centroid_scalar(centroids, index.k_clusters, &query_f32)
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            nearest_centroid_scalar(centroids, index.k_clusters, &query_f32)
+        }
+    };
 
     let mut heap = FixedHeap::<5>::new();
     scan_cluster(index, query, best_cluster, &mut heap);
